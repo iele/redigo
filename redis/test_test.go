@@ -23,7 +23,6 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -39,7 +38,7 @@ var (
 
 	serverPath     = flag.String("redis-server", "redis-server", "Path to redis server binary")
 	serverAddress  = flag.String("redis-address", "127.0.0.1", "The address of the server")
-	serverBasePort = flag.Int("redis-port", 16379, "Beginning of port range for test servers")
+	serverBasePort = flag.Int("redis-port", 6379, "Beginning of port range for test servers")
 	serverLogName  = flag.String("redis-log", "", "Write Redis server logs to `filename`")
 	serverLog      = ioutil.Discard
 
@@ -140,12 +139,12 @@ func DefaultServerAddr() (string, error) {
 	if defaultServer != nil || defaultServerErr != nil {
 		return addr, defaultServerErr
 	}
-	defaultServer, defaultServerErr = NewServer(
-		"default",
-		"--port", strconv.Itoa(*serverBasePort),
-		"--bind", *serverAddress,
-		"--save", "",
-		"--appendonly", "no")
+	//defaultServer, defaultServerErr = NewServer(
+	//	"default",
+	//	"--port", strconv.Itoa(*serverBasePort),
+	//	"--bind", *serverAddress,
+	//	"--save", "",
+	//	"--appendonly", "no")
 	return addr, defaultServerErr
 }
 
