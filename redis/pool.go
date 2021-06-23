@@ -20,6 +20,7 @@ import (
 	"crypto/rand"
 	"crypto/sha1"
 	"errors"
+	"fmt"
 	"io"
 	"strconv"
 	"sync"
@@ -159,6 +160,9 @@ type Pool struct {
 	// the pool does not close connections based on age.
 	MaxConnLifetime time.Duration
 
+	// Add TencentCloud proxyid support
+	SupportProxyId bool
+
 	mu           sync.Mutex    // mu protects the following fields
 	closed       bool          // set to true when the pool is closed.
 	active       int           // the number of open connections in the pool
@@ -279,16 +283,14 @@ func (p *Pool) GetContext(ctx context.Context) (Conn, error) {
 		return errorConn{err}, err
 	}
 	proxyid := ""
-	proxy_id, err := c.Do("proxyid")
-	if err == nil {
-		pid, ok := proxy_id.(string)
-		if ok {
-			proxyid = pid
+	if p.SupportProxyId {
+		oproxyid, err := c.Do("proxyid")
+		if err == nil {
+			sproxyid, ok := oproxyid.(string)
+			if ok {
+				proxyid = sproxyid
+			}
 		}
-	}
-
-	if _, ok := p.idle.lists[proxyid]; !ok {
-		p.idle.proxys = append(p.idle.proxys, proxyid)
 	}
 	return &activeConn{p: p, pc: &poolConn{c: c, p: proxyid, created: nowFunc()}}, nil
 }
@@ -349,6 +351,7 @@ func (p *Pool) Close() error {
 		return nil
 	}
 	p.closed = true
+	p.mu.Unlock()
 	for _, v := range p.idle.lists {
 		p.active -= v.count
 		pc := v.front
@@ -357,11 +360,11 @@ func (p *Pool) Close() error {
 		if p.ch != nil {
 			close(p.ch)
 		}
-		p.mu.Unlock()
 		for ; pc != nil; pc = pc.next {
 			pc.c.Close()
 		}
 	}
+	fmt.Printf("-----1111111------ %d \n", p.active)
 	p.idle.totalCount = 0
 	return nil
 }
@@ -640,18 +643,46 @@ type poolConn struct {
 }
 
 func (l *idleLists) pushFront(proxyid string, pc *poolConn) {
+	if _, ok := l.lists[proxyid]; !ok {
+		l.lists[proxyid] = &idleList{}
+		l.newProxy(proxyid)
+	}
 	l.lists[proxyid].pushFront(pc)
 	l.totalCount++
 }
 
 func (l *idleLists) popFront(proxyid string) {
 	l.lists[proxyid].popFront()
+	l.checkProxy(proxyid)
 	l.totalCount--
 }
 
 func (l *idleLists) popBack(proxyid string) {
 	l.lists[proxyid].popBack()
+	l.checkProxy(proxyid)
 	l.totalCount--
+}
+
+func (l *idleLists) newProxy(proxyid string) {
+	for _, p := range l.proxys {
+		if p == proxyid {
+			return
+		}
+	}
+	l.proxys = append(l.proxys, proxyid)
+}
+
+func (l *idleLists) checkProxy(proxyid string) {
+	if l.lists[proxyid].count == 0 {
+		delete(l.lists, proxyid)
+		nproxys := []string{}
+		for _, p := range l.proxys {
+			if p != proxyid {
+				nproxys = append(nproxys, p)
+			}
+		}
+		l.proxys = nproxys
+	}
 }
 
 func (l *idleList) pushFront(pc *poolConn) {
