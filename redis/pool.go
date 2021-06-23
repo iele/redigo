@@ -164,7 +164,7 @@ type Pool struct {
 	active       int           // the number of open connections in the pool
 	initOnce     sync.Once     // the init ch once func
 	ch           chan struct{} // limits open connections when p.Wait is true
-	idle         idleList      // idle connections
+	idle         idleLists     // idle connections
 	waitCount    int64         // total number of connections waited for.
 	waitDuration time.Duration // total time waited for new connections.
 }
@@ -211,29 +211,46 @@ func (p *Pool) GetContext(ctx context.Context) (Conn, error) {
 
 	// Prune stale connections at the back of the idle list.
 	if p.IdleTimeout > 0 {
-		n := p.idle.count
-		for i := 0; i < n && p.idle.back != nil && p.idle.back.t.Add(p.IdleTimeout).Before(nowFunc()); i++ {
-			pc := p.idle.back
-			p.idle.popBack()
+		for k, v := range p.idle.lists {
+			n := v.count
+			for i := 0; i < n && v.back != nil && v.back.t.Add(p.IdleTimeout).Before(nowFunc()); i++ {
+				pc := v.back
+				p.idle.popBack(k)
+				p.mu.Unlock()
+				pc.c.Close()
+				p.mu.Lock()
+				p.active--
+			}
+		}
+	}
+
+	if p.idle.lists == nil {
+		p.idle.lists = map[string]*idleList{}
+	}
+
+	// Get idle connection from the front of idle list.
+	proxys := len(p.idle.proxys)
+	if proxys != 0 {
+		picked := p.idle.picker % proxys
+		p.idle.picker++
+
+		proxyid := p.idle.proxys[picked]
+		if p.idle.lists[proxyid] == nil {
+			p.idle.lists[proxyid] = &idleList{}
+		}
+		list := p.idle.lists[proxyid]
+		for list.front != nil {
+			pc := list.front
+			p.idle.popFront(proxyid)
 			p.mu.Unlock()
+			if (p.TestOnBorrow == nil || p.TestOnBorrow(pc.c, pc.t) == nil) &&
+				(p.MaxConnLifetime == 0 || nowFunc().Sub(pc.created) < p.MaxConnLifetime) {
+				return &activeConn{p: p, pc: pc}, nil
+			}
 			pc.c.Close()
 			p.mu.Lock()
 			p.active--
 		}
-	}
-
-	// Get idle connection from the front of idle list.
-	for p.idle.front != nil {
-		pc := p.idle.front
-		p.idle.popFront()
-		p.mu.Unlock()
-		if (p.TestOnBorrow == nil || p.TestOnBorrow(pc.c, pc.t) == nil) &&
-			(p.MaxConnLifetime == 0 || nowFunc().Sub(pc.created) < p.MaxConnLifetime) {
-			return &activeConn{p: p, pc: pc}, nil
-		}
-		pc.c.Close()
-		p.mu.Lock()
-		p.active--
 	}
 
 	// Check for pool closed before dialing a new connection.
@@ -261,7 +278,19 @@ func (p *Pool) GetContext(ctx context.Context) (Conn, error) {
 		p.mu.Unlock()
 		return errorConn{err}, err
 	}
-	return &activeConn{p: p, pc: &poolConn{c: c, created: nowFunc()}}, nil
+	proxyid := ""
+	proxy_id, err := c.Do("proxyid")
+	if err == nil {
+		pid, ok := proxy_id.(string)
+		if ok {
+			proxyid = pid
+		}
+	}
+
+	if _, ok := p.idle.lists[proxyid]; !ok {
+		p.idle.proxys = append(p.idle.proxys, proxyid)
+	}
+	return &activeConn{p: p, pc: &poolConn{c: c, p: proxyid, created: nowFunc()}}, nil
 }
 
 // PoolStats contains pool statistics.
@@ -286,7 +315,7 @@ func (p *Pool) Stats() PoolStats {
 	p.mu.Lock()
 	stats := PoolStats{
 		ActiveCount:  p.active,
-		IdleCount:    p.idle.count,
+		IdleCount:    p.idle.totalCount,
 		WaitCount:    p.waitCount,
 		WaitDuration: p.waitDuration,
 	}
@@ -307,7 +336,7 @@ func (p *Pool) ActiveCount() int {
 // IdleCount returns the number of idle connections in the pool.
 func (p *Pool) IdleCount() int {
 	p.mu.Lock()
-	idle := p.idle.count
+	idle := p.idle.totalCount
 	p.mu.Unlock()
 	return idle
 }
@@ -320,17 +349,20 @@ func (p *Pool) Close() error {
 		return nil
 	}
 	p.closed = true
-	p.active -= p.idle.count
-	pc := p.idle.front
-	p.idle.count = 0
-	p.idle.front, p.idle.back = nil, nil
-	if p.ch != nil {
-		close(p.ch)
+	for _, v := range p.idle.lists {
+		p.active -= v.count
+		pc := v.front
+		v.count = 0
+		v.front, v.back = nil, nil
+		if p.ch != nil {
+			close(p.ch)
+		}
+		p.mu.Unlock()
+		for ; pc != nil; pc = pc.next {
+			pc.c.Close()
+		}
 	}
-	p.mu.Unlock()
-	for ; pc != nil; pc = pc.next {
-		pc.c.Close()
-	}
+	p.idle.totalCount = 0
 	return nil
 }
 
@@ -403,10 +435,10 @@ func (p *Pool) put(pc *poolConn, forceClose bool) error {
 	p.mu.Lock()
 	if !p.closed && !forceClose {
 		pc.t = nowFunc()
-		p.idle.pushFront(pc)
-		if p.idle.count > p.MaxIdle {
-			pc = p.idle.back
-			p.idle.popBack()
+		p.idle.pushFront(pc.p, pc)
+		if p.idle.totalCount > p.MaxIdle {
+			pc = p.idle.lists[pc.p].back
+			p.idle.popBack(pc.p)
 		} else {
 			pc = nil
 		}
@@ -587,6 +619,13 @@ func (ec errorConn) Flush() error                                          { ret
 func (ec errorConn) Receive() (interface{}, error)                         { return nil, ec.err }
 func (ec errorConn) ReceiveWithTimeout(time.Duration) (interface{}, error) { return nil, ec.err }
 
+type idleLists struct {
+	totalCount int
+	picker     int
+	proxys     []string
+	lists      map[string]*idleList
+}
+
 type idleList struct {
 	count       int
 	front, back *poolConn
@@ -594,9 +633,25 @@ type idleList struct {
 
 type poolConn struct {
 	c          Conn
+	p          string
 	t          time.Time
 	created    time.Time
 	next, prev *poolConn
+}
+
+func (l *idleLists) pushFront(proxyid string, pc *poolConn) {
+	l.lists[proxyid].pushFront(pc)
+	l.totalCount++
+}
+
+func (l *idleLists) popFront(proxyid string) {
+	l.lists[proxyid].popFront()
+	l.totalCount--
+}
+
+func (l *idleLists) popBack(proxyid string) {
+	l.lists[proxyid].popBack()
+	l.totalCount--
 }
 
 func (l *idleList) pushFront(pc *poolConn) {
