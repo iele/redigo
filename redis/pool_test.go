@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	testGoRoutines = 10
+	testGoRoutines = 100
 )
 
 type poolTestConn struct {

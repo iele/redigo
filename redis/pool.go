@@ -20,7 +20,6 @@ import (
 	"crypto/rand"
 	"crypto/sha1"
 	"errors"
-	"fmt"
 	"io"
 	"strconv"
 	"sync"
@@ -364,7 +363,6 @@ func (p *Pool) Close() error {
 			pc.c.Close()
 		}
 	}
-	fmt.Printf("-----1111111------ %d \n", p.active)
 	p.idle.totalCount = 0
 	return nil
 }
