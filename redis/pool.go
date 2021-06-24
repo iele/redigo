@@ -283,7 +283,7 @@ func (p *Pool) GetContext(ctx context.Context) (Conn, error) {
 	}
 	proxyid := ""
 	if p.SupportProxyId {
-		oproxyid, err := c.Do("proxyid")
+		oproxyid, err := c.Do("PROXYID")
 		if err == nil {
 			sproxyid, ok := oproxyid.(string)
 			if ok {
@@ -350,19 +350,24 @@ func (p *Pool) Close() error {
 		return nil
 	}
 	p.closed = true
-	p.mu.Unlock()
+
+	if p.ch != nil {
+		close(p.ch)
+	}
+
 	for _, v := range p.idle.lists {
 		p.active -= v.count
 		pc := v.front
 		v.count = 0
 		v.front, v.back = nil, nil
-		if p.ch != nil {
-			close(p.ch)
-		}
 		for ; pc != nil; pc = pc.next {
+			p.mu.Unlock()
 			pc.c.Close()
+			p.mu.Lock()
 		}
 	}
+	p.mu.Unlock()
+
 	p.idle.totalCount = 0
 	return nil
 }

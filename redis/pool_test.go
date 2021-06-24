@@ -17,6 +17,7 @@ package redis_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"reflect"
@@ -46,6 +47,8 @@ func (c *poolTestConn) Close() error {
 }
 
 func (c *poolTestConn) Err() error { return c.err }
+
+var proxyid []string
 
 func (c *poolTestConn) Do(commandName string, args ...interface{}) (interface{}, error) {
 	if commandName == "ERR" {
@@ -650,6 +653,7 @@ func TestWaitPoolClose(t *testing.T) {
 	d.check("before close", p, 1, 1, 1)
 	p.Close()
 	timeout := time.After(2 * time.Second)
+	fmt.Printf("---------------- %d\n", len(errs))
 	for i := 0; i < cap(errs); i++ {
 		select {
 		case err := <-errs:
