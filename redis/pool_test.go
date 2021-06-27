@@ -631,12 +631,79 @@ func TestWaitPool(t *testing.T) {
 	d.checkAll("done", p, 1, 1, 0, testGoRoutines, time.Since(start)*testGoRoutines)
 }
 
+func TestWaitPoolLifo(t *testing.T) {
+	d := poolDialer{t: t}
+	p := &redis.Pool{
+		MaxIdle:   1,
+		MaxActive: 1,
+		Dial:      d.dial,
+		Lifo:      true,
+		Wait:      true,
+	}
+	defer p.Close()
+
+	c := p.Get()
+	start := time.Now()
+	errs := startGoroutines(p, "PING")
+	d.check("before close", p, 1, 1, 1)
+	c.Close()
+	timeout := time.After(2 * time.Second)
+	for i := 0; i < cap(errs); i++ {
+		select {
+		case err := <-errs:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-timeout:
+			t.Fatalf("timeout waiting for blocked goroutine %d", i)
+		}
+	}
+	d.checkAll("done", p, 1, 1, 0, testGoRoutines, time.Since(start)*testGoRoutines)
+}
+
 func TestWaitPoolClose(t *testing.T) {
 	d := poolDialer{t: t}
 	p := &redis.Pool{
 		MaxIdle:   1,
 		MaxActive: 1,
 		Dial:      d.dial,
+		Wait:      true,
+	}
+	defer p.Close()
+
+	c := p.Get()
+	if _, err := c.Do("PING"); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	errs := startGoroutines(p, "PING")
+	d.check("before close", p, 1, 1, 1)
+	p.Close()
+	timeout := time.After(2 * time.Second)
+	for i := 0; i < cap(errs); i++ {
+		select {
+		case err := <-errs:
+			switch err {
+			case nil:
+				t.Fatal("blocked goroutine did not get error")
+			case redis.ErrPoolExhausted:
+				t.Fatal("blocked goroutine got pool exhausted error")
+			}
+		case <-timeout:
+			t.Fatal("timeout waiting for blocked goroutine")
+		}
+	}
+	c.Close()
+	d.checkAll("done", p, 1, 0, 0, testGoRoutines, time.Since(start)*testGoRoutines)
+}
+
+func TestWaitPoolCloseLifo(t *testing.T) {
+	d := poolDialer{t: t}
+	p := &redis.Pool{
+		MaxIdle:   1,
+		MaxActive: 1,
+		Dial:      d.dial,
+		Lifo:      true,
 		Wait:      true,
 	}
 	defer p.Close()
@@ -794,6 +861,22 @@ func TestLocking_TestOnBorrowFails_PoolDoesntCrash(t *testing.T) {
 func BenchmarkPoolGet(b *testing.B) {
 	b.StopTimer()
 	p := redis.Pool{Dial: func() (redis.Conn, error) { return redis.DialDefaultServer() }, MaxIdle: 2}
+	c := p.Get()
+	if err := c.Err(); err != nil {
+		b.Fatal(err)
+	}
+	c.Close()
+	defer p.Close()
+	b.StartTimer()
+	for i := 0; i < b.N; i++ {
+		c = p.Get()
+		c.Close()
+	}
+}
+
+func BenchmarkPoolGetLifo(b *testing.B) {
+	b.StopTimer()
+	p := redis.Pool{Dial: func() (redis.Conn, error) { return redis.DialDefaultServer() }, MaxIdle: 2, Lifo: true}
 	c := p.Get()
 	if err := c.Err(); err != nil {
 		b.Fatal(err)
