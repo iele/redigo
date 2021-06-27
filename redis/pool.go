@@ -159,6 +159,10 @@ type Pool struct {
 	// the pool does not close connections based on age.
 	MaxConnLifetime time.Duration
 
+	// Idle connection in the pool method, If the value is true, then using pushBack,
+	// otherwise using pushFront, default is false.
+	Lifo bool
+
 	mu           sync.Mutex    // mu protects the following fields
 	closed       bool          // set to true when the pool is closed.
 	active       int           // the number of open connections in the pool
@@ -403,7 +407,11 @@ func (p *Pool) put(pc *poolConn, forceClose bool) error {
 	p.mu.Lock()
 	if !p.closed && !forceClose {
 		pc.t = nowFunc()
-		p.idle.pushFront(pc)
+		if p.Lifo {
+			p.idle.pushBack(pc)
+		} else {
+			p.idle.pushFront(pc)
+		}
 		if p.idle.count > p.MaxIdle {
 			pc = p.idle.back
 			p.idle.popBack()
@@ -608,6 +616,22 @@ func (l *idleList) pushFront(pc *poolConn) {
 		l.front.prev = pc
 	}
 	l.front = pc
+	l.count++
+}
+
+func (l *idleList) pushBack(pc *poolConn) {
+	if l.count == 0 {
+		l.front = pc
+		l.back = pc
+		pc.prev = nil
+		pc.next = nil
+	} else {
+		pc.prev = l.back
+		l.back.next = pc
+		l.back = pc
+		pc.next = nil
+	}
+
 	l.count++
 }
 
