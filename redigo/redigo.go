@@ -4,11 +4,9 @@ import (
 	"flag"
 	"fmt"
 	"math/rand"
-	"os"
 	"time"
 
 	"github.com/gomodule/redigo/redis"
-	"go.uber.org/ratelimit"
 )
 
 func main() {
@@ -19,49 +17,49 @@ func main() {
 
 	fmt.Printf("Start redigo test on %s:%d", *flHost, *flPort)
 
-	rl := ratelimit.New(200000)
-
 	pool := &redis.Pool{
-		MaxIdle:   2000,
-		MaxActive: 3000,
+		MaxIdle:   8000,
+		MaxActive: 10000,
 		// Dial or DialContext must be set. When both are set, DialContext takes precedence over Dial.
 		Dial: func() (redis.Conn, error) {
 			return redis.Dial("tcp", fmt.Sprintf("%s:%d", *flHost, *flPort),
 				redis.DialConnectTimeout(time.Duration(1000)*time.Millisecond),
-				redis.DialReadTimeout(time.Duration(500)*time.Millisecond),
-				redis.DialWriteTimeout(time.Duration(500)*time.Millisecond))
+				redis.DialReadTimeout(time.Duration(1000)*time.Millisecond),
+				redis.DialWriteTimeout(time.Duration(1000)*time.Millisecond))
 		},
-		Lifo: true,
+		Lifo: false,
 		Wait: true,
 	}
 	defer pool.Close()
-	for {
-		rl.Take()
+	for i := 0; i < 5000000; i++ {
 		go func() {
-			conn := pool.Get()
-			defer conn.Close()
-			_, err := conn.Do("auth", *flAuth)
-			if err != nil {
-				fmt.Printf("err when auth! err: %v\n", err)
-				os.Exit(0)
-			}
+			for {
+				conn := pool.Get()
+				_, err := conn.Do("auth", *flAuth)
+				if err != nil {
+					//	fmt.Printf("err when auth! err: %v\n", err)
+					//	os.Exit(0)
+				}
 
-			_, err = conn.Do("ping")
-			if err != nil {
-				fmt.Printf("err when ping! err: %v\n", err)
-				os.Exit(0)
-			}
+				_, err = conn.Do("ping")
+				if err != nil {
+					//	fmt.Printf("err when ping! err: %v\n", err)
+					//	os.Exit(0)
+				}
 
-			id, err := conn.Do("proxyid")
-			if err != nil {
-				fmt.Printf("err when ping! err: %v\n", err)
-				os.Exit(0)
-			}
+				_, err = conn.Do("hset", rand.Int31n(100), rand.Int31n(1000),
+					fmt.Sprintf("%d:%d:%d:%d:%d:%d:%d:%d:%d:%d", rand.Int31(), rand.Int31(), rand.Int31(), rand.Int31(), rand.Int31(), rand.Int31(), rand.Int31(), rand.Int31(), rand.Int31(), rand.Int31()))
+				if err != nil {
+					//	fmt.Printf("err when hset! err: %v\n", err)
+					//os.Exit(0)
+				}
 
-			if string(id.([]byte)) == "187ecdcdc23cbd62c8970bbeb207443045f5bf77" {
-				time.Sleep(time.Duration(rand.Int31n(200)+50) * time.Millisecond)
-			} else {
-				//time.Sleep(time.Duration(rand.Int31n(2)) * time.Millisecond)
+				_, err = conn.Do("hgetall", rand.Int31n(100))
+				if err != nil {
+					//	fmt.Printf("err when hset! err: %v\n", err)
+					//os.Exit(0)
+				}
+				conn.Close()
 			}
 		}()
 	}
